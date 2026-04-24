@@ -1,9 +1,15 @@
 require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 const express = require("express");
 const cors = require("cors");
 const twilio = require("twilio");
 const bcrypt = require("bcrypt");
 const { PrismaClient } = require("@prisma/client");
+
+const execFileAsync = promisify(execFile);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -26,6 +32,7 @@ app.use(express.json());
 let latestData = {
   sensors: [0, 0, 0, 0, 0, 0],
   position: "Waiting for ESP32...",
+  positionSource: "init",
   movementCount: 0,
   vibrationActive: false,
   motorsEnabled: false,
@@ -38,10 +45,21 @@ const NOISE_FLOOR = 30;
 const MOVEMENT_DELTA_THRESHOLD = 55;
 const POSITION_MIN_ACTIVE = 35;
 const IMMOBILE_ALERT_SEC = 120;
+const PROJECT_ROOT = path.resolve(__dirname, "..");
+const MODEL_PATH = process.env.POSITION_MODEL_PATH || path.join(PROJECT_ROOT, "position_model.pkl");
+const PREDICT_SCRIPT_PATH =
+  process.env.POSITION_PREDICT_SCRIPT || path.join(PROJECT_ROOT, "predict_position.py");
+const PYTHON_BIN = process.env.PYTHON_BIN || path.join(PROJECT_ROOT, ".venv", "bin", "python");
+const ML_PREDICTION_TIMEOUT_MS = 3000;
+const ML_MIN_INTERVAL_MS = 500;
 
 let baselineSensors = null;
 let previousAdjustedSensors = [0, 0, 0, 0, 0, 0];
 let lastMovementAt = Date.now();
+let mlFallbackLogged = false;
+let lastMlResult = null;
+let lastMlRunAt = 0;
+let mlInFlight = null;
 
 function toNumber(value, fallback = 0) {
   const n = Number(value);
@@ -91,7 +109,7 @@ function adjustSensors(rawSensors) {
   });
 }
 
-function detectPosition(sensors) {
+function detectPositionRuleBased(sensors) {
   const left = sensors[1] + sensors[4];
   const center = sensors[0] + sensors[3];
   const right = sensors[2] + sensors[5];
@@ -104,6 +122,79 @@ function detectPosition(sensors) {
   if (left >= center && left >= right) return "Left";
   if (right >= center && right >= left) return "Right";
   return "Center";
+}
+
+function logMlFallback(reason) {
+  if (mlFallbackLogged) return;
+  mlFallbackLogged = true;
+  console.warn(`ML position fallback enabled: ${reason}`);
+}
+
+async function predictPositionWithModel(sensors) {
+  if (!fs.existsSync(PYTHON_BIN)) {
+    logMlFallback(`Python executable missing at ${PYTHON_BIN}`);
+    return null;
+  }
+
+  if (!fs.existsSync(PREDICT_SCRIPT_PATH)) {
+    logMlFallback(`Predict script missing at ${PREDICT_SCRIPT_PATH}`);
+    return null;
+  }
+
+  if (!fs.existsSync(MODEL_PATH)) {
+    logMlFallback(`Model file missing at ${MODEL_PATH}`);
+    return null;
+  }
+
+  const now = Date.now();
+  const canReuseRecent = lastMlResult && now - lastMlRunAt < ML_MIN_INTERVAL_MS;
+  if (canReuseRecent) {
+    return lastMlResult;
+  }
+
+  if (mlInFlight) {
+    return lastMlResult;
+  }
+
+  const sensorArg = `S:${sensors.join(",")}`;
+  lastMlRunAt = now;
+  mlInFlight = execFileAsync(
+    PYTHON_BIN,
+    [PREDICT_SCRIPT_PATH, "--model", MODEL_PATH, "--sensors", sensorArg, "--format", "json"],
+    {
+      cwd: PROJECT_ROOT,
+      timeout: ML_PREDICTION_TIMEOUT_MS,
+    },
+  )
+    .then(({ stdout }) => {
+      const parsed = JSON.parse(stdout.trim());
+      const position = parsed.prediction ? String(parsed.prediction) : null;
+      const topConfidence = Number.isFinite(parsed.topConfidence)
+        ? Number(parsed.topConfidence)
+        : null;
+
+      if (!position) return null;
+
+      const result = {
+        position,
+        topConfidence,
+      };
+      lastMlResult = result;
+      return result;
+    })
+    .catch((error) => {
+      logMlFallback(error.message || "Prediction process failed");
+      return null;
+    })
+    .finally(() => {
+      mlInFlight = null;
+    });
+
+  if (lastMlResult) {
+    return lastMlResult;
+  }
+
+  return mlInFlight;
 }
 
 function updateDerivedMetrics(adjustedSensors, nextPosition) {
@@ -127,13 +218,27 @@ function updateDerivedMetrics(adjustedSensors, nextPosition) {
   previousAdjustedSensors = adjustedSensors.slice();
 }
 
-function applyIncomingSensorData(body = {}) {
+async function applyIncomingSensorData(body = {}) {
   const normalizedSensors = normalizeSensorPayload(body);
 
   if (normalizedSensors) {
     updateBaseline(normalizedSensors);
     const adjustedSensors = adjustSensors(normalizedSensors);
-    const inferredPosition = body.position || detectPosition(adjustedSensors);
+    const mlResult = await predictPositionWithModel(normalizedSensors);
+    let positionSource = "rule";
+    let inferredPosition = detectPositionRuleBased(adjustedSensors);
+    let mlConfidence = null;
+
+    if (mlResult && mlResult.position) {
+      inferredPosition = mlResult.position;
+      positionSource = "ml";
+      mlConfidence = mlResult.topConfidence;
+    }
+
+    if (body.position) {
+      inferredPosition = body.position;
+      positionSource = "device";
+    }
 
     latestData = {
       ...latestData,
@@ -141,6 +246,9 @@ function applyIncomingSensorData(body = {}) {
       sensors: adjustedSensors,
       rawSensors: normalizedSensors,
       position: inferredPosition,
+      positionSource,
+      mlConfidence,
+      lastSensorAt: new Date().toISOString(),
     };
 
     updateDerivedMetrics(adjustedSensors, inferredPosition);
@@ -307,34 +415,44 @@ app.get("/api/data", (req, res) => {
 });
 
 // RECEIVE DATA
-app.post("/api/esp32-data", (req, res) => {
-  applyIncomingSensorData(req.body);
+app.post("/api/esp32-data", async (req, res) => {
+  try {
+    await applyIncomingSensorData(req.body);
 
-  console.log("📡 ESP32:", latestData);
+    console.log("📡 ESP32:", latestData);
 
-  logs.unshift({
-    time: new Date().toLocaleTimeString(),
-    event: "Sensor update",
-  });
+    logs.unshift({
+      time: new Date().toLocaleTimeString(),
+      event: "Sensor update",
+    });
 
-  if (logs.length > 20) logs.pop();
+    if (logs.length > 20) logs.pop();
 
-  res.json({ message: "Data received" });
+    res.json({ message: "Data received" });
+  } catch (err) {
+    console.error("ESP32 ingest failed:", err);
+    res.status(500).json({ message: "Failed to process sensor data" });
+  }
 });
 
 // ESP32 COMPATIBILITY ROUTES
 // Allows firmware/frontend using /sensors to work without changing existing /api routes.
-app.post("/sensors", (req, res) => {
-  applyIncomingSensorData(req.body);
+app.post("/sensors", async (req, res) => {
+  try {
+    await applyIncomingSensorData(req.body);
 
-  logs.unshift({
-    time: new Date().toLocaleTimeString(),
-    event: "Sensor update",
-  });
+    logs.unshift({
+      time: new Date().toLocaleTimeString(),
+      event: "Sensor update",
+    });
 
-  if (logs.length > 20) logs.pop();
+    if (logs.length > 20) logs.pop();
 
-  res.json({ status: "ok" });
+    res.json({ status: "ok" });
+  } catch (err) {
+    console.error("/sensors ingest failed:", err);
+    res.status(500).json({ status: "error" });
+  }
 });
 
 app.get("/sensors", (req, res) => {
