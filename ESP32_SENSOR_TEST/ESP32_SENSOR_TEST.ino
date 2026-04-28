@@ -11,6 +11,24 @@ int S4 = 33;  // ADC1 ✅
 int S5 = 25;  // ADC2 ⚠️ (with heavy filtering)
 int S6 = 26;  // ADC2 ⚠️ (with heavy filtering)
 
+void configureAdcPins() {
+  // Use full-width ADC range to avoid clipping near 4095 when divider voltage is >1.1V.
+  analogReadResolution(12);
+  analogSetPinAttenuation(S1, ADC_11db);
+  analogSetPinAttenuation(S2, ADC_11db);
+  analogSetPinAttenuation(S3, ADC_11db);
+  analogSetPinAttenuation(S4, ADC_11db);
+  analogSetPinAttenuation(S5, ADC_11db);
+  analogSetPinAttenuation(S6, ADC_11db);
+
+  pinMode(S1, INPUT);
+  pinMode(S2, INPUT);
+  pinMode(S3, INPUT);
+  pinMode(S4, INPUT);
+  pinMode(S5, INPUT);
+  pinMode(S6, INPUT);
+}
+
 // Filtering variables
 float filtered[6] = {0, 0, 0, 0, 0, 0};
 const int SAMPLES = 20;  // Average 20 readings
@@ -28,6 +46,8 @@ int readSensorAveraged(int pin) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  configureAdcPins();
+  Serial.println("FW_MARKER: SENSOR_TEST_DEC_V3");
   Serial.println("\n🚀 FSR DIAGNOSTIC TEST (with filtering)");
   Serial.println("Press sensors and watch values change");
   Serial.println("S5/S6 have heavy averaging for ADC2 stability\n");
@@ -52,17 +72,17 @@ void loop() {
 
   // Print all 6 values on one line
   Serial.print("S1:");
-  Serial.print(s1, 4);
+  Serial.print(s1, DEC);
   Serial.print(" | S2:");
-  Serial.print(s2, 4);
+  Serial.print(s2, DEC);
   Serial.print(" | S3:");
-  Serial.print(s3, 4);
+  Serial.print(s3, DEC);
   Serial.print(" | S4:");
-  Serial.print(s4, 4);
+  Serial.print(s4, DEC);
   Serial.print(" | S5:");
-  Serial.print(s5, 4);
+  Serial.print(s5, DEC);
   Serial.print(" (filt) | S6:");
-  Serial.print(s6, 4);
+  Serial.print(s6, DEC);
   Serial.println(" (filt)");
 
   delay(100);  // Read every 100ms

@@ -44,6 +44,8 @@ let logs = [{ time: "Start", event: "System initialized" }];
 const NOISE_FLOOR = 30;
 const MOVEMENT_DELTA_THRESHOLD = 55;
 const POSITION_MIN_ACTIVE = 35;
+const RAW_ZERO_THRESHOLD = 8;
+const NO_PRESSURE_TOTAL_THRESHOLD = 50;
 const IMMOBILE_ALERT_SEC = 120;
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const MODEL_PATH = process.env.POSITION_MODEL_PATH || path.join(PROJECT_ROOT, "position_model.pkl");
@@ -93,8 +95,9 @@ function updateBaseline(rawSensors) {
   }
 
   for (let i = 0; i < 6; i++) {
-    // Adapt baseline slowly only when value is near current baseline.
-    if (rawSensors[i] <= baselineSensors[i] + 120) {
+    // Adapt baseline slowly only when the reading is near the current baseline,
+    // regardless of whether pressure pulls the value up or down.
+    if (Math.abs(rawSensors[i] - baselineSensors[i]) <= 120) {
       baselineSensors[i] = baselineSensors[i] * 0.98 + rawSensors[i] * 0.02;
     }
   }
@@ -103,25 +106,51 @@ function updateBaseline(rawSensors) {
 function adjustSensors(rawSensors) {
   return rawSensors.map((raw, i) => {
     const base = baselineSensors ? baselineSensors[i] : 0;
-    const adjustedRaw = Math.max(0, raw - base - NOISE_FLOOR);
+    const adjustedRaw = Math.max(0, Math.abs(raw - base) - NOISE_FLOOR);
     // Map 12-bit ADC (0-4095) into dashboard-friendly 0-1023 scale.
     return Math.min(1023, Math.round(adjustedRaw / 4));
   });
 }
 
-function detectPositionRuleBased(sensors) {
-  const left = sensors[1] + sensors[4];
-  const center = sensors[0] + sensors[3];
-  const right = sensors[2] + sensors[5];
-  const maxSide = Math.max(left, center, right);
+function isRawNoPressure(rawSensors) {
+  return rawSensors.every((value) => value <= RAW_ZERO_THRESHOLD);
+}
 
-  if (maxSide < POSITION_MIN_ACTIVE) {
+function mapMlPositionLabel(label) {
+  const normalized = String(label || "").toLowerCase();
+  if (normalized === "left") return "Left Side (Shoulder/Ankle)";
+  if (normalized === "right") return "Right Side (Shoulder/Ankle)";
+  if (normalized === "center") return "Centered (Head/Hip Alignment)";
+  if (normalized === "no pressure") return "No pressure";
+  return label;
+}
+
+function detectPositionRuleBased(sensors) {
+  const [head, leftShoulder, rightShoulder, hipBack, leftAnkle, rightAnkle] = sensors;
+  const total = sensors.reduce((sum, value) => sum + value, 0);
+  const leftChain = leftShoulder + leftAnkle;
+  const rightChain = rightShoulder + rightAnkle;
+  const lateralDelta = Math.abs(leftChain - rightChain);
+
+  if (total < NO_PRESSURE_TOTAL_THRESHOLD) {
     return "No pressure";
   }
 
-  if (left >= center && left >= right) return "Left";
-  if (right >= center && right >= left) return "Right";
-  return "Center";
+  if (lateralDelta >= 90) {
+    return leftChain > rightChain
+      ? "Left Side (Shoulder/Ankle)"
+      : "Right Side (Shoulder/Ankle)";
+  }
+
+  const dominant = Math.max(head, leftShoulder, rightShoulder, hipBack, leftAnkle, rightAnkle);
+  if (dominant <= POSITION_MIN_ACTIVE) {
+    return "Centered (Low Pressure)";
+  }
+
+  if (dominant === head) return "Head Pressure";
+  if (dominant === hipBack) return "Hip/Back Pressure";
+  if (dominant === leftShoulder || dominant === rightShoulder) return "Shoulder Pressure";
+  return "Ankle Pressure";
 }
 
 function logMlFallback(reason) {
@@ -222,15 +251,22 @@ async function applyIncomingSensorData(body = {}) {
   const normalizedSensors = normalizeSensorPayload(body);
 
   if (normalizedSensors) {
+    const rawNoPressure = isRawNoPressure(normalizedSensors);
     updateBaseline(normalizedSensors);
-    const adjustedSensors = adjustSensors(normalizedSensors);
-    const mlResult = await predictPositionWithModel(normalizedSensors);
+    let adjustedSensors = adjustSensors(normalizedSensors);
+    if (rawNoPressure) {
+      adjustedSensors = [0, 0, 0, 0, 0, 0];
+    }
+
+    const adjustedTotal = adjustedSensors.reduce((sum, value) => sum + value, 0);
+    const shouldRunMl = !rawNoPressure && adjustedTotal >= NO_PRESSURE_TOTAL_THRESHOLD;
+    const mlResult = shouldRunMl ? await predictPositionWithModel(normalizedSensors) : null;
     let positionSource = "rule";
     let inferredPosition = detectPositionRuleBased(adjustedSensors);
     let mlConfidence = null;
 
-    if (mlResult && mlResult.position) {
-      inferredPosition = mlResult.position;
+    if (mlResult && mlResult.position && inferredPosition !== "No pressure") {
+      inferredPosition = mapMlPositionLabel(mlResult.position);
       positionSource = "ml";
       mlConfidence = mlResult.topConfidence;
     }
@@ -414,6 +450,23 @@ app.get("/api/data", (req, res) => {
   res.json(latestData);
 });
 
+// Reset only rendered heatmap sensors, keep body-position context/history intact.
+app.post("/api/heatmap/reset", (req, res) => {
+  latestData = {
+    ...latestData,
+    sensors: [0, 0, 0, 0, 0, 0],
+  };
+
+  logs.unshift({
+    time: new Date().toLocaleTimeString(),
+    event: "Heatmap reset",
+  });
+
+  if (logs.length > 20) logs.pop();
+
+  res.json({ message: "Heatmap reset" });
+});
+
 // RECEIVE DATA
 app.post("/api/esp32-data", async (req, res) => {
   try {
@@ -481,6 +534,19 @@ app.get("/api/logs", (req, res) => {
 // ROOT
 app.get("/", (req, res) => {
   res.send("✅ Backend running");
+});
+
+// Reduce noisy stack traces when clients disconnect mid-body upload.
+app.use((err, req, res, next) => {
+  const isAborted =
+    err?.type === "request.aborted" ||
+    /request aborted/i.test(String(err?.message || ""));
+
+  if (isAborted) {
+    return res.status(400).json({ message: "Request aborted" });
+  }
+
+  return next(err);
 });
 
 // START

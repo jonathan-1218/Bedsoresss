@@ -1,178 +1,173 @@
-// ESP32 FSR sensors with WiFi + filtering
-// Reads 6 FSR sensors with filtering and sends to backend
-// S5/S6 on ADC2 get heavy averaging for stability
+// ESP32 FSR sender (stable version with ADC2 fix)
 
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
-// WIFI (update these to your NEW network)
-const char* ssid = "amazepixels";
-const char* password = "03041979";
+// ================= WIFI =================
+const char *ssid = "Jonathan";
+const char *password = "12345678";
 
-// Backend API (match your Mac's IP address)
-const char* serverUrl = "http://192.168.0.10:5000/sensors";
+// ================= BACKEND =================
+const bool USE_PUBLIC_TUNNEL = false;
 
-// FSR pins (all on current pins)
-int S1 = 34;  // ADC1
-int S2 = 35;  // ADC1
-int S3 = 32;  // ADC1
-int S4 = 33;  // ADC1
-int S5 = 25;  // ADC2 (with heavy filtering)
-int S6 = 26;  // ADC2 (with heavy filtering)
+const char *LOCAL_SERVER_URL = "http://10.153.163.150:5000/api/esp32-data";
+const char *PUBLIC_TUNNEL_URL = "https://fancy-stars-sin.loca.lt/api/esp32-data";
 
-// Filtering variables
-float filtered[6] = {0, 0, 0, 0, 0, 0};
-const int SAMPLES = 4;   // Very low averaging for minimal lag
-const float ALPHA = 1.0; // No smoothing lag on S5/S6
-const int WIFI_RECONNECT_TIMEOUT_MS = 12000;
-const int SEND_INTERVAL_MS = 180;
-const int ADC2_REFRESH_EVERY_N_CYCLES = 12;
+const char *serverUrl = USE_PUBLIC_TUNNEL ? PUBLIC_TUNNEL_URL : LOCAL_SERVER_URL;
 
-int lastS5Raw = 0;
-int lastS6Raw = 0;
-int cycleCount = 0;
+// ================= SENSOR PINS =================
+const int S1 = 34;  // ADC1
+const int S2 = 35;  // ADC1
+const int S3 = 32;  // ADC1
+const int S4 = 33;  // ADC1
+const int S5 = 25;  // ADC2
+const int S6 = 26;  // ADC2
 
+// ================= CONFIG =================
+const int WIFI_CONNECT_TIMEOUT_MS = 12000;
+const int HTTP_TIMEOUT_MS = 3000;
+
+// Averaging
+const int ADC_SAMPLES = 8;
+
+// ================= SETUP =================
+void configureAdc() {
+  analogReadResolution(12);
+
+  analogSetPinAttenuation(S1, ADC_11db);
+  analogSetPinAttenuation(S2, ADC_11db);
+  analogSetPinAttenuation(S3, ADC_11db);
+  analogSetPinAttenuation(S4, ADC_11db);
+  analogSetPinAttenuation(S5, ADC_11db);
+  analogSetPinAttenuation(S6, ADC_11db);
+}
+
+// ================= WIFI =================
 bool connectWiFi() {
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+
   WiFi.begin(ssid, password);
 
-  Serial.print("Connecting to WiFi");
-  for (int attempts = 0; attempts < 20; attempts++) {
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println(" ok");
-      Serial.print("ESP32 IP: ");
-      Serial.println(WiFi.localIP());
-      return true;
-    }
-    delay(500);
+  Serial.print("Connecting WiFi");
+
+  unsigned long start = millis();
+
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(300);
     Serial.print(".");
   }
 
-  Serial.println(" failed");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(" OK");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    return true;
+  }
+
+  Serial.println(" FAILED");
   return false;
 }
 
-int readSensorAveraged(int pin) {
+// ================= SENSOR READ =================
+int readAveraged(int pin) {
   long sum = 0;
-  for (int i = 0; i < SAMPLES; i++) {
+  for (int i = 0; i < ADC_SAMPLES; i++) {
     sum += analogRead(pin);
-    delayMicroseconds(100);
+    delayMicroseconds(120);
   }
-  return sum / SAMPLES;
+  return sum / ADC_SAMPLES;
 }
 
-bool reconnectWiFiWithTimeout(unsigned long timeoutMs) {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
-    delay(250);
-  }
-
-  return WiFi.status() == WL_CONNECTED;
-}
-
-void readAdc2WithWifiPause(int &s5_raw, int &s6_raw) {
-  // ADC2 (GPIO25/26) cannot be sampled reliably while WiFi is active.
-  WiFi.disconnect(true, false);
+void readAllSensors(int &s1, int &s2, int &s3, int &s4, int &s5, int &s6) {
+  // 🔴 TURN WIFI OFF (required for ADC2)
   WiFi.mode(WIFI_OFF);
-  delay(10);
+  delay(5);
 
-  s5_raw = readSensorAveraged(S5);
-  s6_raw = readSensorAveraged(S6);
-
-  reconnectWiFiWithTimeout(WIFI_RECONNECT_TIMEOUT_MS);
+  s1 = readAveraged(S1);
+  s2 = readAveraged(S2);
+  s3 = readAveraged(S3);
+  s4 = readAveraged(S4);
+  s5 = readAveraged(S5);  // ADC2 safe now
+  s6 = readAveraged(S6);  // ADC2 safe now
 }
 
+// ================= SEND =================
+bool sendToBackend(int s1, int s2, int s3, int s4, int s5, int s6) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  char json[128];
+  snprintf(json, sizeof(json),
+           "{\"S1\":%d,\"S2\":%d,\"S3\":%d,\"S4\":%d,\"S5\":%d,\"S6\":%d}",
+           s1, s2, s3, s4, s5, s6);
+
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+
+  WiFiClientSecure secureClient;
+
+  if (USE_PUBLIC_TUNNEL) {
+    secureClient.setInsecure();
+    http.begin(secureClient, serverUrl);
+  } else {
+    http.begin(serverUrl);
+  }
+
+  http.addHeader("Content-Type", "application/json");
+
+  int code = http.POST((uint8_t *)json, strlen(json));
+  http.end();
+
+  Serial.print("HTTP: ");
+  Serial.println(code);
+
+  return code > 0;
+}
+
+// ================= MAIN =================
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(800);
 
-  Serial.println("\nESP32 FSR sender started");
-  Serial.print("SSID: ");
-  Serial.println(ssid);
+  configureAdc();
+
+  Serial.println("ESP32 6xFSR sender (FINAL)");
+  Serial.print("Mode: ");
+  Serial.println(USE_PUBLIC_TUNNEL ? "PUBLIC TUNNEL" : "LOCAL LAN");
+
   connectWiFi();
 }
 
 void loop() {
+  int s1, s2, s3, s4, s5, s6;
+
+  // 1. Read sensors (WiFi OFF inside)
+  readAllSensors(s1, s2, s3, s4, s5, s6);
+
+  // Debug output
+  Serial.print("S:");
+  Serial.print(s1); Serial.print(",");
+  Serial.print(s2); Serial.print(",");
+  Serial.print(s3); Serial.print(",");
+  Serial.print(s4); Serial.print(",");
+  Serial.print(s5); Serial.print(",");
+  Serial.println(s6);
+
+  // 2. Turn WiFi back ON
+  WiFi.mode(WIFI_STA);
+  delay(10);
+
+  // 3. Reconnect if needed
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected, retrying...");
+    Serial.println("Reconnecting WiFi...");
     connectWiFi();
-    delay(2000);
-    return;
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
+  // 4. Send data
+  sendToBackend(s1, s2, s3, s4, s5, s6);
 
-    // ADC1 pins: single averaged read
-    int s1 = readSensorAveraged(S1);
-    int s2 = readSensorAveraged(S2);
-    int s3 = readSensorAveraged(S3);
-    int s4 = readSensorAveraged(S4);
-    
-    // ADC2 pins are expensive with WiFi ON; refresh rarely to keep UI responsive.
-    if (cycleCount % ADC2_REFRESH_EVERY_N_CYCLES == 0) {
-      int s5_raw = 0;
-      int s6_raw = 0;
-      readAdc2WithWifiPause(s5_raw, s6_raw);
-
-      if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("WiFi reconnect failed after ADC2 read");
-        delay(2000);
-        return;
-      }
-
-      lastS5Raw = s5_raw;
-      lastS6Raw = s6_raw;
-    }
-    
-    filtered[4] = filtered[4] * (1.0 - ALPHA) + lastS5Raw * ALPHA;
-    filtered[5] = filtered[5] * (1.0 - ALPHA) + lastS6Raw * ALPHA;
-    
-    int s5 = (int)filtered[4];
-    int s6 = (int)filtered[5];
-
-    Serial.print("RAW S2:");
-    Serial.print(s2);
-    Serial.print(" RAW S5:");
-    Serial.print(lastS5Raw);
-    Serial.print(" | S:");
-    Serial.print(s1);
-    Serial.print(",");
-    Serial.print(s2);
-    Serial.print(",");
-    Serial.print(s3);
-    Serial.print(",");
-    Serial.print(s4);
-    Serial.print(",");
-    Serial.print(s5);
-    Serial.print(",");
-    Serial.print(s6);
-    Serial.print(" | ");
-
-    HTTPClient http;
-    http.begin(serverUrl);
-    http.addHeader("Content-Type", "application/json");
-
-    // JSON payload
-    String json = "{";
-    json += "\"S1\":" + String(s1) + ",";
-    json += "\"S2\":" + String(s2) + ",";
-    json += "\"S3\":" + String(s3) + ",";
-    json += "\"S4\":" + String(s4) + ",";
-    json += "\"S5\":" + String(s5) + ",";
-    json += "\"S6\":" + String(s6);
-    json += "}";
-
-    int response = http.POST(json);
-
-    Serial.print("HTTP response: ");
-    Serial.println(response);
-
-    http.end();
-    cycleCount++;
-  }
-
-  delay(SEND_INTERVAL_MS);
+  delay(2000);
 }
