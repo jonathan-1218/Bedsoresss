@@ -305,6 +305,24 @@ app.post("/api/register", async (req, res) => {
   const { name, email, phone, password, role } = req.body;
 
   try {
+    // Check if email already exists
+    const existingEmail = await prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (existingEmail) {
+      return res.status(409).json({ message: "Email already registered" });
+    }
+
+    // Check if phone already exists
+    const existingPhone = await prisma.user.findUnique({
+      where: { phone },
+    });
+
+    if (existingPhone) {
+      return res.status(409).json({ message: "Phone number already registered" });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await prisma.user.create({
