@@ -62,3 +62,4 @@ Optional environment overrides:
 - `PYTHON_BIN` (default: `../.venv/bin/python` relative to `backend/`)
 - `POSITION_PREDICT_SCRIPT` (default: `../predict_position.py`)
 - `POSITION_MODEL_PATH` (default: `../position_model.pkl`)
+- `PRESSURE_ALERT_TO` (phone number that receives stagnant-pressure SMS alerts)

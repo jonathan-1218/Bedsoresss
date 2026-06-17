@@ -23,6 +23,7 @@ const client =
   process.env.TWILIO_AUTH_TOKEN
     ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
     : null;
+const pressureAlertRecipient = process.env.PRESSURE_ALERT_TO || process.env.NEW_USER_NOTIFY_TO;
 
 // ================= MIDDLEWARE =================
 app.use(cors());
@@ -46,7 +47,7 @@ const MOVEMENT_DELTA_THRESHOLD = 55;
 const POSITION_MIN_ACTIVE = 35;
 const RAW_ZERO_THRESHOLD = 8;
 const NO_PRESSURE_TOTAL_THRESHOLD = 50;
-const IMMOBILE_ALERT_SEC = 120;
+const IMMOBILE_ALERT_SEC = 60;
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const MODEL_PATH = process.env.POSITION_MODEL_PATH || path.join(PROJECT_ROOT, "position_model.pkl");
 const PREDICT_SCRIPT_PATH =
@@ -62,6 +63,7 @@ let mlFallbackLogged = false;
 let lastMlResult = null;
 let lastMlRunAt = 0;
 let mlInFlight = null;
+let pressureAlertSentForCurrentEpisode = false;
 
 function toNumber(value, fallback = 0) {
   const n = Number(value);
@@ -240,11 +242,48 @@ function updateDerivedMetrics(adjustedSensors, nextPosition) {
   if (delta >= MOVEMENT_DELTA_THRESHOLD || positionChanged) {
     latestData.movementCount += 1;
     lastMovementAt = now;
+    pressureAlertSentForCurrentEpisode = false;
   }
 
   latestData.immobileForSec = Math.max(0, Math.floor((now - lastMovementAt) / 1000));
   latestData.vibrationActive = latestData.motorsEnabled && latestData.immobileForSec >= IMMOBILE_ALERT_SEC;
   previousAdjustedSensors = adjustedSensors.slice();
+
+  return delta;
+}
+
+async function maybeSendPressureStagnationAlert(adjustedSensors, nextPosition, delta) {
+  if (!client || !pressureAlertRecipient || !process.env.TWILIO_PHONE_NUMBER) {
+    return;
+  }
+
+  if (pressureAlertSentForCurrentEpisode || latestData.immobileForSec < IMMOBILE_ALERT_SEC) {
+    return;
+  }
+
+  const totalPressure = adjustedSensors.reduce((sum, value) => sum + value, 0);
+  if (totalPressure < NO_PRESSURE_TOTAL_THRESHOLD) {
+    return;
+  }
+
+  try {
+    await client.messages.create({
+      body: [
+        "Bedsores pressure alert",
+        `Pressure has stayed nearly unchanged for ${latestData.immobileForSec} seconds.`,
+        `Current position: ${nextPosition || latestData.position}`,
+        `Pressure change score: ${delta}`,
+        "Please check and reposition the patient.",
+      ].join("\n"),
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to: pressureAlertRecipient,
+    });
+
+    pressureAlertSentForCurrentEpisode = true;
+    latestData.pressureAlertSentAt = new Date().toISOString();
+  } catch (e) {
+    console.log("Twilio failed:", e.message);
+  }
 }
 
 async function applyIncomingSensorData(body = {}) {
@@ -287,7 +326,8 @@ async function applyIncomingSensorData(body = {}) {
       lastSensorAt: new Date().toISOString(),
     };
 
-    updateDerivedMetrics(adjustedSensors, inferredPosition);
+    const delta = updateDerivedMetrics(adjustedSensors, inferredPosition);
+    await maybeSendPressureStagnationAlert(adjustedSensors, inferredPosition, delta);
     return;
   }
 
