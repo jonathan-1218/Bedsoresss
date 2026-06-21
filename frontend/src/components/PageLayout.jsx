@@ -1,11 +1,13 @@
-import React from "react";
+import React, { useState } from "react";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
 
 export default function PageLayout({ user, onLogout, title, breadcrumb, motorsEnabled, toggleMotors, children }) {
+  const [collapsed, setCollapsed] = useState(false);
+
   return (
     <div className="flex min-h-screen">
-      <Sidebar user={user} onLogout={onLogout} />
+      <Sidebar user={user} onLogout={onLogout} collapsed={collapsed} />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar
           title={title}
@@ -13,6 +15,8 @@ export default function PageLayout({ user, onLogout, title, breadcrumb, motorsEn
           motorsEnabled={motorsEnabled}
           toggleMotors={toggleMotors}
           user={user}
+          sidebarCollapsed={collapsed}
+          onToggleSidebar={() => setCollapsed(c => !c)}
         />
         <main className="flex-1 p-5 space-y-5 overflow-auto">
           {children}

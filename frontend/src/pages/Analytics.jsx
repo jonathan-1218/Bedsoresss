@@ -15,6 +15,7 @@ export default function Analytics({ user, onLogout }) {
   const [positionSource, setPositionSource] = useState("init");
   const [mlConfidence, setMlConfidence] = useState(null);
   const [lastSensorAt, setLastSensorAt] = useState(null);
+  const [sensors, setSensors] = useState([0, 0, 0, 0, 0, 0]);
 
   const sensorAgeMs = lastSensorAt ? Date.now() - new Date(lastSensorAt).getTime() : Infinity;
   const isSensorOnline = Number.isFinite(sensorAgeMs) && sensorAgeMs <= 3000;
@@ -30,6 +31,7 @@ export default function Analytics({ user, onLogout }) {
         setPositionSource(d.positionSource || "unknown");
         setMlConfidence(Number.isFinite(d.mlConfidence) ? d.mlConfidence : null);
         setLastSensorAt(d.lastSensorAt || null);
+        setSensors(Array.isArray(d.sensors) ? d.sensors.slice(0, 6) : [0, 0, 0, 0, 0, 0]);
         setHistory(p => [...p.slice(-29), {
           time: t,
           S1: d.sensors[0] || 0, S2: d.sensors[1] || 0, S3: d.sensors[2] || 0,
@@ -77,7 +79,7 @@ export default function Analytics({ user, onLogout }) {
           </div>
         </div>
 
-        <BedPosition3D position={currentPosition} />
+        <BedPosition3D position={currentPosition} sensors={sensors} />
 
         {lastSensorAt && (
           <p className="text-slate-400 text-xs mt-3">

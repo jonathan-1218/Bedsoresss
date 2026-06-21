@@ -34,7 +34,7 @@ export default function BodyPositionMap({ position, sensors = [0, 0, 0, 0, 0, 0]
   const anatomyResult = inferAnatomyResult(values);
 
   const sensorBlock = (isActive, extraClass = "") =>
-    `flex items-center justify-center rounded-2xl font-mono text-sm tracking-widest transition-all duration-500 ${extraClass} ${
+    `flex items-center justify-center text-center whitespace-nowrap rounded-2xl font-mono text-sm tracking-widest transition-all duration-500 ${extraClass} ${
       isActive
         ? "bg-pink-200/30 text-pink-200 border border-pink-300/40 shadow-[0_0_18px_rgba(244,114,182,0.25)]"
         : "bg-[#1e2a1e]/60 text-[#8a9e8a] border border-[#2a3a2a]/60"
@@ -47,18 +47,18 @@ export default function BodyPositionMap({ position, sensors = [0, 0, 0, 0, 0, 0]
       </p>
 
       <div className="flex flex-col items-center gap-5">
-        <div className={sensorBlock(sensorState.S1, "w-32 h-14")}>S1 · Head</div>
+        <div className={sensorBlock(sensorState.S1, "w-36 h-12")}>S1 · Head</div>
 
         <div className="flex gap-4 items-center">
-          <div className={sensorBlock(sensorState.S2, "w-32 h-14")}>S2 · L Shoulder</div>
-          <div className={sensorBlock(sensorState.S3, "w-32 h-14")}>S3 · R Shoulder</div>
+          <div className={sensorBlock(sensorState.S2, "w-36 h-12")}>S2 · L Shoulder</div>
+          <div className={sensorBlock(sensorState.S3, "w-36 h-12")}>S3 · R Shoulder</div>
         </div>
 
-        <div className={sensorBlock(sensorState.S4, "w-44 h-14")}>S4 · Hip/Back</div>
+        <div className={sensorBlock(sensorState.S4, "w-44 h-12")}>S4 · Hip/Back</div>
 
         <div className="flex gap-4 items-center">
-          <div className={sensorBlock(sensorState.S5, "w-36 h-14")}>S5 · L Ankle</div>
-          <div className={sensorBlock(sensorState.S6, "w-36 h-14")}>S6 · R Ankle</div>
+          <div className={sensorBlock(sensorState.S5, "w-36 h-12")}>S5 · L Ankle</div>
+          <div className={sensorBlock(sensorState.S6, "w-36 h-12")}>S6 · R Ankle</div>
         </div>
       </div>
 

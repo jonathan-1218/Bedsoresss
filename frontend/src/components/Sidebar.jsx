@@ -1,11 +1,10 @@
-import React, { useState } from "react";
-import { LayoutDashboard, BarChart3, Settings, Users, LogOut, Activity, ChevronLeft, ChevronRight } from "lucide-react";
+import React from "react";
+import { LayoutDashboard, BarChart3, Settings, Users, LogOut, Activity } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
-export default function Sidebar({ user, onLogout }) {
+export default function Sidebar({ user, onLogout, collapsed }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const [collapsed, setCollapsed] = useState(false);
 
   const links = [
     { name: "Dashboard",  path: "/",          icon: LayoutDashboard },
@@ -20,8 +19,8 @@ export default function Sidebar({ user, onLogout }) {
 
   return (
     <aside
-      className="glass glow flex-shrink-0 flex flex-col relative transition-all duration-300 hidden md:flex border-r border-cyan-400/10"
-      style={{ width: collapsed ? 64 : 240, minHeight: "100vh" }}
+      className="glass glow flex-shrink-0 flex flex-col relative transition-all duration-300 hidden md:flex border-r border-cyan-400/10 sticky top-0 h-screen overflow-y-auto"
+      style={{ width: collapsed ? 64 : 240 }}
     >
       {/* Logo */}
       <div className={`flex items-center gap-3 px-4 h-16 border-b border-cyan-400/10 ${collapsed ? "justify-center" : ""}`}>
@@ -30,14 +29,6 @@ export default function Sidebar({ user, onLogout }) {
         </div>
         {!collapsed && <h1 className="text-base font-bold text-white tracking-tight">BedSore AI</h1>}
       </div>
-
-      {/* Collapse toggle */}
-      <button
-        onClick={() => setCollapsed(c => !c)}
-        className="absolute -right-3 top-[72px] w-6 h-6 rounded-full bg-slate-800 border border-cyan-400/20 flex items-center justify-center shadow-md text-slate-400 hover:text-cyan-300 transition-colors z-10"
-      >
-        {collapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
-      </button>
 
       {/* User chip */}
       {!collapsed && (
